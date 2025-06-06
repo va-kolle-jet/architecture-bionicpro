@@ -28,34 +28,39 @@ app.add_middleware(
 REPORT_ROLE = "prothetic_user"
 APP_KEYCLOAK_URL = os.environ.get("APP_KEYCLOAK_URL", "http://localhost:8080")
 APP_KEYCLOAK_REALM = os.environ.get("APP_KEYCLOAK_REALM", "reports-realm")
-APP_KEYCLOAK_ISSUER = f"{APP_KEYCLOAK_URL}/realms/{APP_KEYCLOAK_REALM}"
-OIDC_DISCOVERY_URL = f"{APP_KEYCLOAK_URL}/realms/{APP_KEYCLOAK_REALM}/.well-known/openid-configuration"
+APP_KEYCLOAK_CERTS_URL = f"{APP_KEYCLOAK_URL}/realms/{APP_KEYCLOAK_REALM}/protocol/openid-connect/certs"
 
 bearer = HTTPBearer()
 
 async def load_public_key():
-    logger.info(f"OIDC_DISCOVERY_URL: {OIDC_DISCOVERY_URL}")
-    oidc_config = requests.get(OIDC_DISCOVERY_URL).json()
-
-    logger.info(f"oidc_config: {oidc_config}")
-    jwks_uri = oidc_config["jwks_uri"]
-
-    logger.info(f"jwks_uri: {jwks_uri}")
-    jwks = requests.get(jwks_uri).json()
-    keys = jwks.get("keys", [])
-    return RSAAlgorithm.from_jwk(keys['keys'][1])
-
+    async with AsyncClient() as client:
+        logger.info(f"APP_KEYCLOAK_CERTS_URL: {APP_KEYCLOAK_CERTS_URL}")
+        response = await client.get(APP_KEYCLOAK_CERTS_URL)
+        if response.status_code != 200:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="missing keycloak keys")
+        keys = response.json()
+        logger.debug(f"keys: {keys}")
+        # public_key = RSAAlgorithm.from_jwk(keys['keys'][1])
+        public_key = RSAAlgorithm.from_jwk(keys['keys'][0])
+        logger.debug(f"public_key: {public_key}")
+        return public_key
 
 async def get_current_user(token: HTTPAuthorizationCredentials = Depends(bearer)):
 
     public_key = await load_public_key()
 
     try:
+        logger.debug(f"token.credentials: {token.credentials}")
         payload = jwt.decode(token.credentials, public_key, algorithms=['RS256'])
+        logger.debug(f"payload: {payload}")
     except Exception as e:
+        logger.error(f"str(e): {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-    roles = payload.get("realm_access", {}).get("roles", [])
+    realm_access = payload.get("realm_access", {})
+    logger.debug(f"realm_access: {realm_access}")
+    roles = realm_access.get("roles", [])
+    logger.info(f"roles: {roles}")
     if REPORT_ROLE not in roles:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"missing '{REPORT_ROLE}' role")
 
@@ -76,6 +81,6 @@ async def generate_random_data(n, k):
     return data
 
 @app.get("/reports", dependencies=[Depends(get_current_user)])
-async def get_reports() -> dict:
+async def get_reports():
 
     return await generate_random_data(10, 10)
